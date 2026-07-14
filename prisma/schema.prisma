@@ -1,0 +1,218 @@
+// Prisma schema for To'yxonaTop
+// Pointed at PostgreSQL (Neon). DATABASE_URL must be set to the Neon connection string.
+// Statuses/roles are plain strings validated via Zod in lib/validations.ts;
+// list-like fields are stored as JSON strings and parsed in lib/serialize.ts.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Roles: "CUSTOMER" | "OWNER" | "ADMIN"
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  phone        String?
+  telegram     String?
+  role         String   @default("CUSTOMER")
+  createdAt    DateTime @default(now())
+
+  // Security: session revocation ("log out everywhere" bumps this, which
+  // invalidates every previously issued JWT since verifySession checks it).
+  tokenVersion Int @default(0)
+
+  // Security: TOTP two-factor auth (required for ADMIN role at login).
+  twoFactorSecret String?
+  twoFactorEnabled Boolean @default(false)
+
+  venues    Venue[]
+  reviews   Review[]
+  favorites Favorite[]
+}
+
+// Status: "PENDING" | "APPROVED" | "REJECTED"
+model Venue {
+  id           String  @id @default(cuid())
+  slug         String  @unique
+  ownerId      String
+  owner        User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  businessName String
+  hallName     String
+  ownerName    String
+  phones       String // JSON string array
+  telegram     String?
+  email        String?
+  website      String?
+  instagram    String?
+
+  region       String
+  district     String
+  address      String
+  lat          Float?
+  lng          Float?
+
+  capacityMin  Int
+  capacityMax  Int
+  priceMin     Int
+  priceMax     Int
+  currency     String  @default("UZS")
+
+  descriptionUz String
+  descriptionRu String
+  descriptionEn String
+
+  parking      Boolean @default(false)
+  outdoorArea  Boolean @default(false)
+  vipRoom      Boolean @default(false)
+  halal        Boolean @default(true)
+  luxury       Boolean @default(false)
+  budget       Boolean @default(false)
+  hasKitchen   Boolean @default(true)
+  kitchenType  String? // e.g. "Milliy", "Turk", "Yevropa"
+
+  virtualTourUrl String?
+
+  status       String  @default("PENDING")
+  featured     Boolean @default(false)
+  rating       Float   @default(0)
+  reviewCount  Int     @default(0)
+  viewCount    Int     @default(0)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  photos       VenuePhoto[]
+  videos       VenueVideo[]
+  reviews      Review[]
+  favorites    Favorite[]
+  availability AvailabilityDate[]
+  services     Service[]  @relation("VenueServices")
+  categories   Category[] @relation("VenueCategories")
+
+  @@index([region, district])
+  @@index([status])
+  @@index([featured])
+}
+
+// Kind: "INTERIOR" | "EXTERIOR"
+model VenuePhoto {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  url     String
+  kind    String @default("INTERIOR")
+  order   Int    @default(0)
+}
+
+model VenueVideo {
+  id      String  @id @default(cuid())
+  venueId String
+  venue   Venue   @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  url     String
+  title   String?
+}
+
+model Service {
+  id     String  @id @default(cuid())
+  slug   String  @unique
+  nameUz String
+  nameRu String
+  nameEn String
+  icon   String?
+
+  venues Venue[] @relation("VenueServices")
+}
+
+model Category {
+  id     String  @id @default(cuid())
+  slug   String  @unique
+  nameUz String
+  nameRu String
+  nameEn String
+  icon   String?
+
+  venues Venue[] @relation("VenueCategories")
+}
+
+// Status: "PENDING" | "APPROVED"
+model Review {
+  id        String   @id @default(cuid())
+  venueId   String
+  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  guestName String?
+  rating    Int
+  comment   String
+  photos    String? // JSON string array of photo URLs
+  status    String   @default("PENDING")
+  createdAt DateTime @default(now())
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venueId   String
+  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, venueId])
+}
+
+model AvailabilityDate {
+  id        String   @id @default(cuid())
+  venueId   String
+  venue     Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  date      DateTime
+  available Boolean  @default(true)
+
+  @@unique([venueId, date])
+}
+
+// Placement: "HOME_TOP" | "SEARCH_SIDEBAR" | "HOME_BANNER"
+model Advertisement {
+  id        String   @id @default(cuid())
+  title     String
+  imageUrl  String
+  linkUrl   String
+  placement String   @default("HOME_BANNER")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+// Every login attempt (success and failure), keyed by client IP, so lockout
+// works correctly across serverless instances (an in-memory counter would
+// not survive across function invocations on Vercel).
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  ip        String
+  email     String
+  success   Boolean
+  createdAt DateTime @default(now())
+
+  @@index([ip, createdAt])
+  @@index([email, createdAt])
+}
+
+// Audit trail of every admin action, for incident investigation.
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  adminEmail String
+  action     String // e.g. "venue.approve", "venue.delete", "review.reject", "ad.create"
+  targetType String? // e.g. "Venue", "Review", "Advertisement", "User"
+  targetId   String?
+  metadata   String? // JSON string with any extra context
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([adminId, createdAt])
+}
